@@ -80,12 +80,14 @@ class SequenceToSequenceSignModel(nn.Module):
                  num_heads: int = 8,
                  dim_feedforward: int = 1024,
                  dropout: float = 0.1,
-                 max_seq_len: int = 500):
+                 max_seq_len: int = 500,
+                 label_smoothing: float = 0.0):  # Label smoothing 추가
         super().__init__()
         
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.max_seq_len = max_seq_len
+        self.label_smoothing = label_smoothing  # Label smoothing 저장
         
         # 1. 공간 인코더 (133개 키포인트 → 임베딩)
         self.spatial_encoder = SpatialEncoder(
@@ -138,6 +140,16 @@ class SequenceToSequenceSignModel(nn.Module):
         self.register_buffer('word_loss_weight', torch.tensor(1.0))
         self.register_buffer('boundary_loss_weight', torch.tensor(0.5))
         self.register_buffer('confidence_loss_weight', torch.tensor(0.3))
+        
+        # 8. Label Smoothing 손실 함수 초기화
+        if self.label_smoothing > 0:
+            self.word_loss_fn = LabelSmoothingCrossEntropy(
+                num_classes=vocab_size, 
+                smoothing=self.label_smoothing,
+                ignore_index=0
+            )
+        else:
+            self.word_loss_fn = None
         
         self._init_weights()
     
@@ -295,12 +307,20 @@ class SequenceToSequenceSignModel(nn.Module):
         
         losses = {}
         
-        # 1. 단어 분류 손실
-        word_loss = F.cross_entropy(
-            word_logits.reshape(-1, self.vocab_size),  # view 대신 reshape 사용
-            vocab_ids.reshape(-1),  # view 대신 reshape 사용
-            ignore_index=0  # 패딩 무시
-        )
+        # 1. 단어 분류 손실 (Label Smoothing 적용)
+        if self.label_smoothing > 0 and self.word_loss_fn is not None:
+            # Label Smoothing 손실 사용
+            word_loss = self.word_loss_fn(
+                word_logits.reshape(-1, self.vocab_size),
+                vocab_ids.reshape(-1)
+            )
+        else:
+            # 일반 CrossEntropy 손실 사용
+            word_loss = F.cross_entropy(
+                word_logits.reshape(-1, self.vocab_size),
+                vocab_ids.reshape(-1),
+                ignore_index=0  # 패딩 무시
+            )
         losses['word_loss'] = word_loss
         
         # 2. 경계 탐지 손실 (있는 경우)
@@ -340,6 +360,39 @@ class SequenceToSequenceSignModel(nn.Module):
         losses['total_loss'] = total_loss
         
         return losses
+
+class LabelSmoothingCrossEntropy(nn.Module):
+    """Label Smoothing Cross Entropy Loss"""
+    
+    def __init__(self, num_classes: int, smoothing: float = 0.1, ignore_index: int = 0):
+        super().__init__()
+        self.num_classes = num_classes
+        self.smoothing = smoothing
+        self.ignore_index = ignore_index
+        self.confidence = 1.0 - smoothing
+        
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            pred: [N, num_classes] - 예측 logits
+            target: [N] - 타겟 클래스 인덱스
+        """
+        pred = pred.log_softmax(dim=-1)
+        
+        # One-hot 인코딩 생성
+        true_dist = torch.zeros_like(pred)
+        true_dist.fill_(self.smoothing / (self.num_classes - 1))
+        true_dist.scatter_(1, target.unsqueeze(1), self.confidence)
+        
+        # ignore_index 처리
+        mask = (target != self.ignore_index).float()
+        true_dist = true_dist * mask.unsqueeze(1)
+        
+        # KL Divergence 계산
+        loss = torch.sum(-true_dist * pred, dim=-1)
+        loss = loss * mask
+        
+        return loss.sum() / mask.sum().clamp(min=1)
 
 class RealtimeDecoder:
     """실시간 디코딩 클래스"""

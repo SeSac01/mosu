@@ -201,9 +201,9 @@ class AdvancedTrainingConfig:
     # 디바이스 설정
     device: str = "auto"
     
-    # 멀티 GPU 설정
-    multi_gpu: bool = False
-    use_data_parallel: bool = True  # DataParallel 사용 여부
+    # 멀티 GPU 설정 (임시로 False로 설정하여 안정성 확보)
+    multi_gpu: bool = False  # 멀티 GPU 비활성화 (디바이스 동기화 오류 회피)
+    use_data_parallel: bool = False  # DataParallel 비활성화
     auto_adjust_batch_size: bool = True  # 멀티 GPU에 맞게 배치 크기 자동 조정
     
     # 실험 관리
@@ -213,6 +213,27 @@ class AdvancedTrainingConfig:
     # 평가 설정
     evaluate_on_test: bool = True
     test_every_n_stages: int = 1
+
+# 테스트용 빠른 설정 생성 함수
+def create_quick_test_config(epochs_per_stage: int = 1) -> AdvancedTrainingConfig:
+    """테스트용 빠른 설정 생성"""
+    config = AdvancedTrainingConfig()
+    
+    # 모든 단계의 에포크를 줄임
+    for stage in config.multi_stage.stages:
+        stage.num_epochs = epochs_per_stage
+        stage.batch_size = min(16, stage.batch_size)  # 배치 크기도 줄임
+    
+    # 얼리스탑 patience 줄임
+    config.early_stopping.patience = 2
+    
+    # 실험명 변경
+    config.experiment_name = f"quick_test_epoch_{epochs_per_stage}"
+    
+    # 개선 임계값을 매우 작게 설정 (모든 단계 진행)
+    config.multi_stage.improvement_threshold = -1.0  # 항상 개선으로 간주
+    
+    return config
 
 if __name__ == "__main__":
     # 설정 테스트

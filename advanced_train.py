@@ -44,9 +44,10 @@ def create_custom_config(args) -> AdvancedTrainingConfig:
     if args.device:
         config.device = args.device
     
-    # 멀티 GPU 설정
-    if args.multi_gpu:
+    # 멀티 GPU 설정 - 기본값 유지하되, 명령행에서 비활성화 가능
+    if hasattr(args, 'multi_gpu') and args.multi_gpu is not None:
         config.multi_gpu = args.multi_gpu
+    # 기본값인 True가 그대로 사용됨 (자동 감지)
         
     if hasattr(args, 'data_parallel') and args.data_parallel is not None:
         config.use_data_parallel = args.data_parallel

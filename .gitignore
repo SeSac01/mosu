@@ -16,3 +16,11 @@ yolov8s.pt
 #data
 data/
 data*
+
+log*
+advanced_logs/
+*pt
+*json
+*log
+olds/
+*.txt

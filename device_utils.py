@@ -215,13 +215,47 @@ class DeviceManager:
             멀티 GPU가 설정된 모델
         """
         if device.type == "cuda" and torch.cuda.device_count() > 1:
+            # 먼저 모델을 메인 디바이스로 완전히 이동
+            model = model.to(device)
+            
+            # 모든 서브모듈과 버퍼를 명시적으로 메인 디바이스로 이동
+            def move_to_device(module):
+                for child in module.children():
+                    move_to_device(child)
+                # 파라미터 이동
+                for param in module.parameters(recurse=False):
+                    if param.device != device:
+                        param.data = param.data.to(device)
+                        if param.grad is not None:
+                            param.grad.data = param.grad.data.to(device)
+                # 버퍼 이동
+                for buffer in module.buffers(recurse=False):
+                    if buffer.device != device:
+                        buffer.data = buffer.data.to(device)
+            
             if use_data_parallel:
-                model = torch.nn.DataParallel(model)
-                logger.info(f"🚀 DataParallel 설정 완료: {torch.cuda.device_count()}개 GPU 사용")
+                # 디바이스 동기화 강화
+                move_to_device(model)
+                
+                # 모든 파라미터가 같은 디바이스에 있는지 최종 확인
+                devices = {param.device for param in model.parameters()}
+                if len(devices) > 1:
+                    logger.error(f"❌ 모델 파라미터가 여러 디바이스에 분산됨: {devices}")
+                    # 강제로 모든 파라미터를 메인 디바이스로 이동
+                    model = model.to(device)
+                
+                # DataParallel 설정
+                model = torch.nn.DataParallel(model, device_ids=list(range(torch.cuda.device_count())))
+                model = model.to(device)  # DataParallel 래퍼도 메인 디바이스에
+                
+                logger.info(f"🚀 DataParallel 설정 완료: {torch.cuda.device_count()}개 GPU 사용 (디바이스: {list(range(torch.cuda.device_count()))})")
             else:
                 logger.info(f"🚀 멀티 GPU 환경 감지됨: {torch.cuda.device_count()}개 GPU (수동 관리)")
+        else:
+            # 단일 GPU 또는 CPU
+            model = model.to(device)
         
-        return model.to(device)
+        return model
     
     @staticmethod
     def get_effective_batch_size(base_batch_size: int, device: torch.device) -> int:

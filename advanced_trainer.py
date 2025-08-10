@@ -107,17 +107,15 @@ class AdvancedSignLanguageTrainer:
             num_heads=8,
             dim_feedforward=1024,
             max_seq_len=200,
-            dropout=stage_config.dropout_rate
+            dropout=stage_config.dropout_rate,
+            label_smoothing=stage_config.label_smoothing  # 라벨 스무딩 추가
         )
         
-        # 멀티 GPU 설정
-        if self.config.multi_gpu and self.multi_gpu_available:
-            model = DeviceManager.setup_multi_gpu(
-                model, self.device, self.config.use_data_parallel
-            )
-        else:
-            model = model.to(self.device)
-            
+        # 먼저 모델을 메인 디바이스로 이동
+        model = model.to(self.device)
+        logger.info(f"📱 모델을 {self.device}로 이동 완료")
+        
+        # 멀티 GPU 설정은 나중에 별도로 수행
         return model
     
     def setup_stage_training(self, 
@@ -296,6 +294,21 @@ class AdvancedSignLanguageTrainer:
                 }, best_model_path)
                 logger.info(f"💾 최고 성능 모델 저장: {best_model_path}")
             
+            # 각 단계별 모델 저장 (성능과 상관없이)
+            stage_model_path = self.checkpoint_dir / f"stage_{stage_idx+1}_{stage_config.name}.pt"
+            torch.save({
+                'stage_idx': stage_idx + 1,
+                'stage_name': stage_config.name,
+                'stage_description': stage_config.description,
+                'epoch': best_epoch,
+                'model_state_dict': model.state_dict(),
+                'val_loss': best_val_loss,
+                'val_accuracy': best_val_accuracy,
+                'stage_config': stage_config.__dict__,
+                'training_time': stage_results['training_time']
+            }, stage_model_path)
+            logger.info(f"🗃️ Stage {stage_idx+1} 모델 저장: {stage_model_path}")
+            
             # 테스트 평가 (선택적)
             if self.config.evaluate_on_test and (stage_idx + 1) % self.config.test_every_n_stages == 0:
                 logger.info("📊 테스트 세트 평가 중...")
@@ -399,6 +412,11 @@ class AdvancedSignLanguageTrainer:
         if 'error' in latest_result:
             return False
         
+        # 개선 임계값이 음수면 항상 계속 (테스트 모드 - 모든 단계 진행)
+        if self.config.multi_stage.improvement_threshold < 0:
+            logger.info("🔄 테스트 모드: 모든 단계 진행")
+            return True
+        
         # 개선도가 임계값보다 낮으면 중단
         improvement = latest_result.get('improvement_from_previous', 0)
         if improvement < self.config.multi_stage.improvement_threshold:
@@ -419,15 +437,22 @@ class AdvancedSignLanguageTrainer:
         first_stage = self.config.multi_stage.stages[0]
         model = self.create_model(base_dataset.vocab_size, first_stage)
         
-        # 멀티 GPU 설정
+        # 멀티 GPU 설정 (모델이 이미 메인 디바이스에 있음)
         if self.config.multi_gpu and DeviceManager.is_multi_gpu_available():
             if self.config.use_data_parallel and torch.cuda.device_count() > 1:
-                DeviceManager.setup_multi_gpu(model)
-                print(f"🚀 DataParallel 활성화: {torch.cuda.device_count()}개 GPU 사용")
+                # 모든 파라미터가 같은 디바이스에 있는지 확인
+                param_devices = {param.device for param in model.parameters()}
+                if len(param_devices) > 1:
+                    logger.warning(f"⚠️ 모델 파라미터가 여러 디바이스에 분산되어 있음: {param_devices}")
+                    model = model.to(self.device)  # 강제로 메인 디바이스로 이동
+                
+                model = DeviceManager.setup_multi_gpu(model, self.device, self.config.use_data_parallel)
+                logger.info(f"🚀 DataParallel 활성화: {torch.cuda.device_count()}개 GPU 사용")
             else:
-                print("⚠️ 멀티 GPU 요청되었지만 DataParallel 비활성화됨")
-        
-        model.to(self.device)
+                logger.warning("⚠️ 멀티 GPU 요청되었지만 DataParallel 비활성화됨")
+        else:
+            # 단일 GPU/CPU 사용
+            model = model.to(self.device)
         
         total_params = sum(p.numel() for p in model.parameters())
         logger.info(f"📊 모델 정보: {total_params:,} 파라미터")
